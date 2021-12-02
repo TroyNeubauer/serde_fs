@@ -1,7 +1,5 @@
+mod de;
 mod error;
 mod ser;
-mod de;
 
-pub use ser::{Serializer, write_to_fs};
-
-
+pub use ser::{write_to_fs, Serializer};
