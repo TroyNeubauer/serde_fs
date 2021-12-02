@@ -512,7 +512,7 @@ impl<'a> ser::Serializer for &'a mut StringSerializer {
         if v {
             self.set_str("true")
         } else {
-            self.set_str("true")
+            self.set_str("false")
         }
     }
 
