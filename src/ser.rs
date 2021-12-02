@@ -10,7 +10,7 @@ pub struct Serializer {
     path: PathBuf,
 }
 
-pub fn write_to_fs<T>(value: &T, path: impl AsRef<Path>) -> Result<()>
+pub fn to_fs<T>(value: &T, path: impl AsRef<Path>) -> Result<()>
 where
     T: Serialize,
 {
@@ -134,11 +134,6 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         self.serialize_unit()
     }
 
-    // A present optional is represented as just the contained value. Note that
-    // this is a lossy representation. For example the values `Some(())` and
-    // `None` both serialize as just `null`. Unfortunately this is typically
-    // what people expect when working with JSON. Other formats are encouraged
-    // to behave more intelligently if possible.
     fn serialize_some<T>(self, value: &T) -> Result<()>
     where
         T: ?Sized + Serialize,
@@ -213,7 +208,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     // explicitly in the serialized form. Some serializers may only be able to
     // support sequences for which the length is known up front.
     fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq> {
-        Ok(SequentialSerializer::new(0, self))
+        Ok(SequentialSerializer::new(self))
     }
 
     // Tuples look just like sequences in JSON. Some formats may be able to
@@ -221,7 +216,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     // means that the corresponding `Deserialize implementation will know the
     // length without needing to look at the serialized data.
     fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple> {
-        Ok(SequentialSerializer::new(0, self))
+        Ok(SequentialSerializer::new(self))
     }
 
     // Tuple structs look just like sequences in JSON.
@@ -230,7 +225,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         _name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleStruct> {
-        Ok(SequentialSerializer::new(0, self))
+        Ok(SequentialSerializer::new(self))
     }
 
     // Tuple variants are represented in JSON as `{ NAME: [DATA...] }`. Again
@@ -243,7 +238,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         _len: usize,
     ) -> Result<Self::SerializeTupleVariant> {
         self.push(variant)?;
-        Ok(SequentialSerializer::new(0, self))
+        Ok(SequentialSerializer::new(self))
     }
 
     // Maps are represented in JSON as `{ K: V, K: V, ... }`.
@@ -280,8 +275,8 @@ pub struct SequentialSerializer<'a> {
 }
 
 impl<'a> SequentialSerializer<'a> {
-    fn new(index: usize, ser: &'a mut Serializer) -> Self {
-        Self { index, ser }
+    fn new(ser: &'a mut Serializer) -> Self {
+        Self { index: 0, ser }
     }
 
     fn serialize<T: ?Sized>(&mut self, value: &T) -> Result<()>
@@ -290,8 +285,6 @@ impl<'a> SequentialSerializer<'a> {
     {
         let mut bytes = [0u8; 32];
         let len = itoa::write(&mut bytes[..], self.index)?;
-        // # Safety
-        // itoa only writes valid utf8
         let num = std::str::from_utf8(&bytes[..len]).unwrap();
 
         self.ser.push(num)?;
@@ -703,33 +696,33 @@ mod tests {
             Struct { a: u32 },
         }
 
-        let base_dir = "./test";
+        let base_dir = "./test-ser-struct";
 
         let test = Test {
             int: 100,
             seq: vec!["a", "b"],
         };
 
-        write_to_fs(&test, base_dir).unwrap();
+        to_fs(&test, base_dir).unwrap();
         check_and_reset(
             base_dir,
             vec![("int", "100"), ("seq/0", "a"), ("seq/1", "b")],
         );
 
         let u = E::Unit;
-        write_to_fs(&u, base_dir).unwrap();
+        to_fs(&u, base_dir).unwrap();
         check_and_reset(base_dir, vec![("Unit", "")]);
 
         let n = E::Newtype(1);
-        write_to_fs(&n, base_dir).unwrap();
+        to_fs(&n, base_dir).unwrap();
         check_and_reset(base_dir, vec![("Newtype", "1")]);
 
         let t = E::Tuple(1, 10);
-        write_to_fs(&t, base_dir).unwrap();
+        to_fs(&t, base_dir).unwrap();
         check_and_reset(base_dir, vec![("Tuple/0", "1"), ("Tuple/1", "10")]);
 
         let s = E::Struct { a: 510 };
-        write_to_fs(&s, base_dir).unwrap();
+        to_fs(&s, base_dir).unwrap();
         check_and_reset(base_dir, vec![("Struct/a", "510")]);
     }
 }
