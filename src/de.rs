@@ -1,4 +1,5 @@
 use std::fs;
+use std::num::{ParseFloatError, ParseIntError};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -445,8 +446,9 @@ impl<'de, 'a> MapAccess<'de> for MapDeserializer<'a> {
                 let os_name = dir.file_name();
                 let path = os_name.to_str().ok_or(DeError::InvalidUnicode)?;
                 self.de.push(path);
-                let de: StringDeserializer<Error> = String::from(path).into_deserializer();
-                Ok(Some(seed.deserialize(de)?))
+                let mut de = KeyDeserializer::new(String::from(path));
+                let a = Ok(Some(seed.deserialize(&mut de)?));
+                a
             }
         }
     }
@@ -532,6 +534,164 @@ impl<'de, 'a> VariantAccess<'de> for Enum<'a> {
     }
 }
 
+struct KeyDeserializer {
+    inner: String,
+}
+
+impl KeyDeserializer {
+    fn new(inner: String) -> Self {
+        Self { inner }
+    }
+
+    fn parse_int<T: FromStr>(&self) -> Result<T>
+    where
+        T: FromStr<Err = ParseIntError>,
+    {
+        Ok(self
+            .inner
+            .parse::<T>()
+            .map_err(|e| Error::Deserialize(DeError::ParseError(e.to_string())))?)
+    }
+
+    fn parse_float<T: FromStr>(&self) -> Result<T>
+    where
+        T: FromStr<Err = ParseFloatError>,
+    {
+        Ok(self
+            .inner
+            .parse::<T>()
+            .map_err(|e| Error::Deserialize(DeError::ParseError(e.to_string())))?)
+    }
+}
+
+impl<'de, 'a> de::Deserializer<'de> for &'a mut KeyDeserializer {
+    type Error = Error;
+
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        unimplemented!()
+    }
+
+    fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_str(visitor)
+    }
+
+    fn deserialize_bool<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        todo!()
+    }
+
+    fn deserialize_i8<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_i8(self.parse_int()?)
+    }
+
+    fn deserialize_i16<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_i16(self.parse_int()?)
+    }
+
+    fn deserialize_i32<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_i32(self.parse_int()?)
+    }
+
+    fn deserialize_i64<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_i64(self.parse_int()?)
+    }
+
+    fn deserialize_u8<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_u8(self.parse_int()?)
+    }
+
+    fn deserialize_u16<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_u16(self.parse_int()?)
+    }
+
+    fn deserialize_u32<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_u32(self.parse_int()?)
+    }
+
+    fn deserialize_u64<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_u64(self.parse_int()?)
+    }
+
+    fn deserialize_f32<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_f32(self.parse_float()?)
+    }
+
+    fn deserialize_f64<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_f64(self.parse_float()?)
+    }
+
+    fn deserialize_char<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        let c = self
+            .inner
+            .chars()
+            .next()
+            .ok_or(Error::Deserialize(DeError::EmptyFile(PathBuf::new())))?;
+
+        visitor.visit_char(c)
+    }
+
+    fn deserialize_str<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_str(self.inner.as_str())
+    }
+
+    fn deserialize_string<V>(self, visitor: V) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_string(self.inner.clone())
+    }
+
+    serde::forward_to_deserialize_any! {
+
+    bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map struct enum ignored_any
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 #[cfg(test)]
@@ -552,17 +712,83 @@ mod tests {
     #[test]
     fn test_struct() {
         #[derive(Deserialize, PartialEq, Debug)]
-        struct Test {
+        struct BasicTest {
             int: u32,
             seq: Vec<String>,
         }
         let test_dir = "./test-de-struct";
         setup_test(test_dir, vec![("int", "7"), ("seq/0", "a"), ("seq/1", "b")]);
 
-        let expected = Test {
+        let expected = BasicTest {
             int: 7,
             seq: vec!["a".to_owned(), "b".to_owned()],
         };
+        assert_eq!(expected, from_fs(test_dir).unwrap());
+
+        use std::collections::HashMap;
+
+        #[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+        pub struct Test {
+            #[serde(rename = "in")]
+            pub input: String,
+            #[serde(rename = "out")]
+            pub expected_output: String,
+        }
+
+        #[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+        pub struct Data {
+            pub input: String,
+            #[serde(rename = "p1")]
+            pub part1_tests: Vec<Test>,
+            #[serde(rename = "p2")]
+            pub part2_tests: Option<Vec<Test>>,
+        }
+
+        #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Deserialize)]
+        pub struct Day {
+            pub year: u32,
+            pub day: u32,
+        }
+
+        #[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
+        pub struct Problems {
+            /// Mapping of years to days to problem data
+            //TODO: Make better once serde_fs supports more types as keys
+            years: HashMap<u32, HashMap<u32, Data>>,
+            session: String,
+        }
+
+        let mut year2020 = HashMap::new();
+        year2020.insert(
+            3,
+            Data {
+                input: "I am input".to_owned(),
+                part1_tests: vec![Test {
+                    input: "b".to_owned(),
+                    expected_output: "b".to_owned(),
+                }],
+                part2_tests: None,
+            },
+        );
+
+        let mut years = HashMap::new();
+        years.insert(2020, year2020);
+
+        let expected = Problems {
+            years,
+            session: "ABCD167".to_owned(),
+        };
+
+        setup_test(
+            test_dir,
+            vec![
+                ("session", "ABCD167"),
+                ("years/2020/3/input", "I am input"),
+                ("years/2020/3/p1/0/out", "b"),
+                ("years/2020/3/p1/0/in", "b"),
+            ],
+        );
+
         assert_eq!(expected, from_fs(test_dir).unwrap());
 
         //Enum tests to be implemented
