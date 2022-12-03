@@ -3,11 +3,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{ser, Serialize};
 
-use crate::error::{Error, Result};
+use crate::error::SerError;
+
+type Error = SerError;
+pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct Serializer {
     /// The current path this serializer is at
     path: PathBuf,
+    path_dirty: bool,
 }
 
 pub fn to_fs<T>(value: &T, path: impl AsRef<Path>) -> Result<()>
@@ -22,20 +26,29 @@ where
 impl Serializer {
     fn new(path: impl AsRef<Path>) -> Result<Self> {
         let path = PathBuf::from(path.as_ref());
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            path_dirty: false,
+        })
     }
 
     /// Writes data to the current file position.
     ///
-    /// Calling this function repeadiadely without calling [`push`] or [`pop`] will result in data
-    /// loss
+    /// # Panics
+    /// This function panics if it is called representedly without a call to [`pop`] before.
+    /// This is done to prevet data loss, as there may be data already written to the current path
+    /// that we cant overwrite
     fn write_data(&mut self, s: impl AsRef<[u8]>) -> Result<()> {
+        if self.path_dirty {
+            panic!("BUG: path dirty: {}", self.path.to_string_lossy());
+        }
         match fs::create_dir_all(&self.path.parent().unwrap()) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(err) => return Err(err.into()),
         }
         fs::write(&self.path, s.as_ref())?;
+        self.path_dirty = true;
         Ok(())
     }
 
@@ -48,6 +61,7 @@ impl Serializer {
 
     fn pop(&mut self) {
         self.path.pop();
+        self.path_dirty = false;
     }
 }
 
@@ -55,7 +69,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     type Ok = ();
 
     // The error type when some error occurs during serialization.
-    type Error = Error;
+    type Error = SerError;
 
     type SerializeSeq = SequentialSerializer<'a>;
     type SerializeTuple = SequentialSerializer<'a>;
@@ -157,12 +171,12 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     // typically use the name.
     fn serialize_unit_variant(
         self,
-        _name: &'static str,
+        name: &'static str,
         _variant_index: u32,
         variant: &'static str,
     ) -> Result<()> {
-        self.push(variant)?;
-        self.serialize_str("")?;
+        self.push(name)?;
+        self.serialize_str(variant)?;
         self.pop();
         Ok(())
     }
@@ -299,7 +313,7 @@ impl<'a> SequentialSerializer<'a> {
 impl<'a> SerializeSeq for SequentialSerializer<'a> {
     type Ok = ();
 
-    type Error = Error;
+    type Error = SerError;
 
     fn serialize_element<T: ?Sized>(&mut self, value: &T) -> Result<()>
     where
@@ -316,7 +330,7 @@ impl<'a> SerializeSeq for SequentialSerializer<'a> {
 impl<'a> SerializeTuple for SequentialSerializer<'a> {
     type Ok = ();
 
-    type Error = Error;
+    type Error = SerError;
 
     fn serialize_element<T: ?Sized>(&mut self, value: &T) -> Result<()>
     where
@@ -333,7 +347,7 @@ impl<'a> SerializeTuple for SequentialSerializer<'a> {
 impl<'a> SerializeTupleStruct for SequentialSerializer<'a> {
     type Ok = ();
 
-    type Error = Error;
+    type Error = SerError;
 
     fn serialize_field<T: ?Sized>(&mut self, value: &T) -> Result<()>
     where
@@ -358,7 +372,7 @@ impl<'a> SerializeTupleStruct for SequentialSerializer<'a> {
 // the `}`.
 impl<'a> ser::SerializeTupleVariant for SequentialSerializer<'a> {
     type Ok = ();
-    type Error = Error;
+    type Error = SerError;
 
     fn serialize_field<T>(&mut self, value: &T) -> Result<()>
     where
@@ -382,7 +396,7 @@ impl<'a> ser::SerializeTupleVariant for SequentialSerializer<'a> {
 // difference so the default behavior for `serialize_entry` is fine.
 impl<'a> ser::SerializeMap for &'a mut Serializer {
     type Ok = ();
-    type Error = Error;
+    type Error = SerError;
 
     // The Serde data model allows map keys to be any serializable type. JSON
     // only allows string keys so the implementation below will produce invalid
@@ -422,7 +436,7 @@ impl<'a> ser::SerializeMap for &'a mut Serializer {
 // constant strings.
 impl<'a> ser::SerializeStruct for &'a mut Serializer {
     type Ok = ();
-    type Error = Error;
+    type Error = SerError;
 
     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<()>
     where
@@ -444,7 +458,7 @@ impl<'a> ser::SerializeStruct for &'a mut Serializer {
 // closing both of the curly braces opened by `serialize_struct_variant`.
 impl<'a> ser::SerializeStructVariant for &'a mut Serializer {
     type Ok = ();
-    type Error = Error;
+    type Error = SerError;
 
     fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<()>
     where
@@ -492,14 +506,14 @@ impl StringSerializer {
 use serde::ser::{Impossible, SerializeSeq, SerializeTuple, SerializeTupleStruct};
 impl<'a> ser::Serializer for &'a mut StringSerializer {
     type Ok = ();
-    type Error = Error;
-    type SerializeSeq = Impossible<(), Error>;
-    type SerializeTuple = Impossible<(), Error>;
-    type SerializeTupleStruct = Impossible<(), Error>;
-    type SerializeTupleVariant = Impossible<(), Error>;
-    type SerializeMap = Impossible<(), Error>;
-    type SerializeStruct = Impossible<(), Error>;
-    type SerializeStructVariant = Impossible<(), Error>;
+    type Error = SerError;
+    type SerializeSeq = Impossible<(), SerError>;
+    type SerializeTuple = Impossible<(), SerError>;
+    type SerializeTupleStruct = Impossible<(), SerError>;
+    type SerializeTupleVariant = Impossible<(), SerError>;
+    type SerializeMap = Impossible<(), SerError>;
+    type SerializeStruct = Impossible<(), SerError>;
+    type SerializeStructVariant = Impossible<(), SerError>;
 
     fn serialize_bool(self, v: bool) -> Result<()> {
         if v {
@@ -680,13 +694,31 @@ mod tests {
 
     #[test]
     #[allow(dead_code)]
-    #[allow(unused_variables)]
     fn test_struct() {
         #[derive(Serialize)]
         struct Test {
             int: u32,
             seq: Vec<&'static str>,
         }
+
+        let test_dir = "./.test-ser-struct";
+
+        let test = Test {
+            int: 100,
+            seq: vec!["a", "b"],
+        };
+
+        to_fs(&test, test_dir).unwrap();
+        check_and_reset(
+            test_dir,
+            vec![("int", "100"), ("seq/0", "a"), ("seq/1", "b")],
+        );
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_unit_enum() {
+        let test_dir = "./.test-ser-unit-enum";
 
         #[derive(Serialize)]
         enum E {
@@ -696,33 +728,20 @@ mod tests {
             Struct { a: u32 },
         }
 
-        let base_dir = "./test-ser-struct";
-
-        let test = Test {
-            int: 100,
-            seq: vec!["a", "b"],
-        };
-
-        to_fs(&test, base_dir).unwrap();
-        check_and_reset(
-            base_dir,
-            vec![("int", "100"), ("seq/0", "a"), ("seq/1", "b")],
-        );
-
         let u = E::Unit;
-        to_fs(&u, base_dir).unwrap();
-        check_and_reset(base_dir, vec![("Unit", "")]);
+        to_fs(&u, test_dir).unwrap();
+        check_and_reset(test_dir, vec![("E", "Unit")]);
 
         let n = E::Newtype(1);
-        to_fs(&n, base_dir).unwrap();
-        check_and_reset(base_dir, vec![("Newtype", "1")]);
+        to_fs(&n, test_dir).unwrap();
+        check_and_reset(test_dir, vec![("Newtype", "1")]);
 
         let t = E::Tuple(1, 10);
-        to_fs(&t, base_dir).unwrap();
-        check_and_reset(base_dir, vec![("Tuple/0", "1"), ("Tuple/1", "10")]);
+        to_fs(&t, test_dir).unwrap();
+        check_and_reset(test_dir, vec![("Tuple/0", "1"), ("Tuple/1", "10")]);
 
         let s = E::Struct { a: 510 };
-        to_fs(&s, base_dir).unwrap();
-        check_and_reset(base_dir, vec![("Struct/a", "510")]);
+        to_fs(&s, test_dir).unwrap();
+        check_and_reset(test_dir, vec![("Struct/a", "510")]);
     }
 }

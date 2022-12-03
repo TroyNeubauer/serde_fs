@@ -1,17 +1,22 @@
 use std::fs;
+use std::marker::PhantomData;
 use std::num::{ParseFloatError, ParseIntError};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use serde::de::value::{StrDeserializer, StringDeserializer};
+use serde::de::value::StringDeserializer;
 use serde::de::{
     self, DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, SeqAccess, VariantAccess,
     Visitor,
 };
 use serde::Deserialize;
 
-use crate::error::{DeError, Error, Result};
+use crate::error::DeError;
 
+type Error = DeError;
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug)]
 pub struct Deserializer {
     /// The current path this serializer is at
     path: PathBuf,
@@ -37,7 +42,7 @@ impl Deserializer {
         }
     }
 
-    fn push(&mut self, path: &str) {
+    fn push(&mut self, path: impl AsRef<Path>) {
         self.path.push(path);
     }
 
@@ -45,14 +50,22 @@ impl Deserializer {
         self.path.pop();
     }
 
-    // Look at the first character in the input without consuming it.
     fn read_bytes(&mut self) -> Result<Vec<u8>> {
-        let path = self.path.to_str().unwrap();
         Ok(fs::read(&self.path)?)
     }
 
+    /// Returns true if the current path points at a file
+    fn points_to_file(&self) -> Result<bool> {
+        let metadata = fs::metadata(&self.path)?;
+        if metadata.is_symlink() {
+            Err(Error::EncounteredSymlink(self.path.clone()))
+        } else {
+            Ok(metadata.is_file())
+        }
+    }
+
     fn read_string(&mut self) -> Result<String> {
-        Ok(String::from_utf8(self.read_bytes()?).map_err(|_| DeError::InvalidUnicode)?)
+        Ok(String::from_utf8(self.read_bytes()?).map_err(|_| Error::InvalidUnicode)?)
     }
 
     fn parse<T>(&mut self) -> Result<T>
@@ -60,13 +73,25 @@ impl Deserializer {
         T: FromStr,
     {
         let string = self.read_string()?;
-        Ok(string
-            .parse()
-            .map_err(|_| Error::Deserialize(DeError::ParseError(string)))?)
+        Ok(string.parse().map_err(|_| Error::ParseError(string))?)
     }
 
     fn path_exists(&self) -> bool {
         fs::metadata(&self.path).is_ok()
+    }
+
+    /// Pushes the first dir entry found in `self.path` to path, and returs the name of the entry
+    /// that was pushed
+    fn push_first_dir_entry(&mut self) -> Result<String> {
+        for path in std::fs::read_dir(&self.path)? {
+            if let Ok(path) = path {
+                let name = path.file_name();
+                let name = name.to_str().ok_or_else(|| Error::InvalidUnicode)?;
+                self.push(name);
+                return Ok(name.to_owned());
+            }
+        }
+        Err(Error::EmptyDirectory(self.path.clone()))
     }
 }
 
@@ -81,7 +106,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer {
         let val = match bytes.as_str() {
             "true" => true,
             "false" => false,
-            a => return Err(DeError::InvalidBool(a.to_owned(), self.path.clone()).into()),
+            a => return Err(Error::InvalidBool(a.to_owned(), self.path.clone()).into()),
         };
         visitor.visit_bool(val)
     }
@@ -170,7 +195,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer {
         let mut it = string.chars();
         let c = it
             .next()
-            .ok_or_else(|| DeError::EmptyFile(self.path.clone()))?;
+            .ok_or_else(|| Error::EmptyFile(self.path.clone()))?;
 
         //XXX: We could be picky and return an error about trailing characters here
         visitor.visit_char(c)
@@ -326,20 +351,42 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer {
     where
         V: Visitor<'de>,
     {
+        // Take the enum below:
+        // enum E {
+        //     Unit,
+        //     Complex(u8),
+        // }
+        // Assume a file within a dir structure looks like: `path1/path2`: "<File data>"
+        //
+        // E::Unit will be serialized as: `./E`: "Unit"
+        // E::Advanced will be serialized as `./E/Complex`: "(u8 value as base 10 string)"
+        let enum_name = self.push_first_dir_entry()?;
+        dbg!(&enum_name);
+
+        if self.points_to_file()? {
+            // handles the basic unit case (E::Unit)
+            println!("basic enum {:?}", &self);
+            let s = self.read_string().unwrap().into_deserializer();
+            let v = visitor.visit_enum(Enum::new(s, self)).unwrap();
+            self.pop();
+            Ok(v)
+        } else {
+            // handles other advanced enums, the name of the variant is the last path
+            let s = self.push_first_dir_entry()?.into_deserializer();
+            println!("not file {:?} variant is {:?}", &self, s);
+            let v = visitor.visit_enum(Enum::new(s, self)).unwrap();
+            self.pop();
+            Ok(v)
+        }
         // Visit a newtype variant, tuple variant, or struct variant.
-        let value = visitor.visit_enum(Enum::new(self))?;
-        Ok(value)
     }
 
     // An identifier in Serde is the type that identifies a field of a struct or
-    // the variant of an enum. In JSON, struct fields and enum variants are
-    // represented as strings. In other formats they may be represented as
-    // numeric indices.
+    // the variant of an enum. Treat as a string
     fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        panic!();
         self.deserialize_str(visitor)
     }
 
@@ -441,7 +488,7 @@ impl<'de, 'a> MapAccess<'de> for MapDeserializer<'a> {
             Some(Err(err)) => Err(Error::IoError(err)),
             Some(Ok(dir)) => {
                 let os_name = dir.file_name();
-                let path = os_name.to_str().ok_or(DeError::InvalidUnicode)?;
+                let path = os_name.to_str().ok_or(Error::InvalidUnicode)?;
                 self.de.push(path);
                 let mut de = KeyDeserializer::new(String::from(path));
                 let a = Ok(Some(seed.deserialize(&mut de)?));
@@ -460,13 +507,17 @@ impl<'de, 'a> MapAccess<'de> for MapDeserializer<'a> {
     }
 }
 
-struct Enum<'a> {
-    de: &'a mut Deserializer,
+struct Enum<'d> {
+    variant: Option<StringDeserializer<DeError>>,
+    de: &'d mut Deserializer,
 }
 
-impl<'a> Enum<'a> {
-    fn new(de: &'a mut Deserializer) -> Self {
-        Enum { de }
+impl<'d> Enum<'d> {
+    fn new(variant: StringDeserializer<DeError>, de: &'d mut Deserializer) -> Self {
+        Enum {
+            variant: Some(variant),
+            de,
+        }
     }
 }
 
@@ -475,32 +526,31 @@ impl<'a> Enum<'a> {
 //
 // Note that all enum deserialization methods in Serde refer exclusively to the
 // "externally tagged" enum representation.
-impl<'de, 'a> EnumAccess<'de> for Enum<'a> {
+impl<'de, 'd> EnumAccess<'de> for Enum<'d> {
     type Error = Error;
     type Variant = Self;
 
-    fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant)>
+    fn variant_seed<V>(mut self, seed: V) -> Result<(V::Value, Self::Variant)>
     where
         V: DeserializeSeed<'de>,
     {
+        let v = seed.deserialize(self.variant.take().unwrap())?;
+        Ok((v, self))
         // This is called and we have to figure which enum we are based on the current path.
         // The problem is that there are many files in the current path that might not be what we
         // want, so just iterate through the dir in deserialize_identifier hoping it gets it right?
-        unimplemented!("Deserializing enums needs more work!");
-        let val = seed.deserialize(&mut *self.de)?;
-        Ok((val, self))
     }
 }
 
 // `VariantAccess` is provided to the `Visitor` to give it the ability to see
 // the content of the single variant that it decided to deserialize.
-impl<'de, 'a> VariantAccess<'de> for Enum<'a> {
+impl<'de, 'd> VariantAccess<'de> for Enum<'d> {
     type Error = Error;
 
     // If the `Visitor` expected this variant to be a unit variant, the input
     // should have been the plain string case handled in `deserialize_enum`.
     fn unit_variant(self) -> Result<()> {
-        unimplemented!()
+        Ok(())
     }
 
     // Newtype variants are represented in JSON as `{ NAME: VALUE }` so
@@ -547,7 +597,7 @@ impl KeyDeserializer {
         Ok(self
             .inner
             .parse::<T>()
-            .map_err(|e| Error::Deserialize(DeError::ParseError(e.to_string())))?)
+            .map_err(|e| Error::ParseError(e.to_string()))?)
     }
 
     fn parse_float<T: FromStr>(&self) -> Result<T>
@@ -557,14 +607,14 @@ impl KeyDeserializer {
         Ok(self
             .inner
             .parse::<T>()
-            .map_err(|e| Error::Deserialize(DeError::ParseError(e.to_string())))?)
+            .map_err(|e| Error::ParseError(e.to_string()))?)
     }
 }
 
 impl<'de, 'a> de::Deserializer<'de> for &'a mut KeyDeserializer {
     type Error = Error;
 
-    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value>
+    fn deserialize_any<V>(self, _visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
@@ -582,7 +632,11 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut KeyDeserializer {
     where
         V: Visitor<'de>,
     {
-        todo!()
+        visitor.visit_bool(match self.inner.as_str() {
+            "true" => true,
+            "false" => false,
+            _ => panic!(),
+        })
     }
 
     fn deserialize_i8<V>(self, visitor: V) -> Result<V::Value>
@@ -663,7 +717,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut KeyDeserializer {
             .inner
             .chars()
             .next()
-            .ok_or(Error::Deserialize(DeError::EmptyFile(PathBuf::new())))?;
+            .ok_or(Error::EmptyFile(PathBuf::new()))?;
 
         visitor.visit_char(c)
     }
@@ -713,7 +767,7 @@ mod tests {
             int: u32,
             seq: Vec<String>,
         }
-        let test_dir = "./test-de-struct";
+        let test_dir = "./.test-de-struct";
         setup_test(test_dir, vec![("int", "7"), ("seq/0", "a"), ("seq/1", "b")]);
 
         let expected = BasicTest {
@@ -750,7 +804,6 @@ mod tests {
         #[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
         pub struct Problems {
             /// Mapping of years to days to problem data
-            //TODO: Make better once serde_fs supports more types as keys
             years: HashMap<u32, HashMap<u32, Data>>,
             session: String,
         }
@@ -787,9 +840,13 @@ mod tests {
         );
 
         assert_eq!(expected, from_fs(test_dir).unwrap());
+        let _ = std::fs::remove_dir_all(test_dir);
+    }
 
+    #[test]
+    fn test_enum() {
+        let test_dir = "./.test-de-enum";
         //Enum tests to be implemented
-        /*
         #[derive(Deserialize, PartialEq, Debug)]
         enum E {
             Unit,
@@ -798,22 +855,21 @@ mod tests {
             Struct { a: u32 },
         }
 
-        setup_test(test_dir, vec![("Unit", "")]);
+        setup_test(test_dir, vec![("E", "Unit")]);
         let expected = E::Unit;
         assert_eq!(expected, from_fs(test_dir).unwrap());
 
-        setup_test(test_dir, vec![("Newtype", "8")]);
+        setup_test(test_dir, vec![("E/Newtype", "8")]);
         let expected = E::Newtype(8);
         assert_eq!(expected, from_fs(test_dir).unwrap());
 
-        setup_test(test_dir, vec![("Tuple/0", "1"), ("Tuple/1", "2")]);
+        setup_test(test_dir, vec![("E/Tuple/0", "1"), ("E/Tuple/1", "2")]);
         let expected = E::Tuple(1, 2);
         assert_eq!(expected, from_fs(test_dir).unwrap());
 
-        setup_test(test_dir, vec![("Struct/a", "14")]);
+        setup_test(test_dir, vec![("E/Struct/a", "14")]);
         let expected = E::Struct { a: 14 };
         assert_eq!(expected, from_fs(test_dir).unwrap());
-        */
         let _ = std::fs::remove_dir_all(test_dir);
     }
 }
