@@ -20,6 +20,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Deserializer {
     /// The current path this serializer is at
     path: PathBuf,
+    expect_json: bool,
 }
 
 // By convention, the public API of a Serde deserializer is one or more
@@ -39,6 +40,7 @@ impl Deserializer {
     pub fn from_fs(path: impl AsRef<Path>) -> Self {
         Deserializer {
             path: PathBuf::from(path.as_ref()),
+            expect_json: false,
         }
     }
 
@@ -83,7 +85,7 @@ impl Deserializer {
     /// Pushes the first dir entry found in `self.path` to path, and returs the name of the entry
     /// that was pushed
     fn push_first_dir_entry(&mut self) -> Result<String> {
-        for path in std::fs::read_dir(&self.path)? {
+        for path in std::fs::read_dir(&self.path).unwrap() {
             if let Ok(path) = path {
                 let name = path.file_name();
                 let name = name.to_str().ok_or_else(|| Error::InvalidUnicode)?;
@@ -233,22 +235,18 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer {
         visitor.visit_byte_buf(self.read_bytes()?)
     }
 
-    // An absent optional is represented as the JSON `null` and a present
-    // optional is represented as just the contained value.
+    // An empty file us used to represen None
     //
-    // As commented in `Serializer` implementation, this is a lossy
-    // representation. For example the values `Some(())` and `None` both
-    // serialize as just `null`. Unfortunately this is typically what people
-    // expect when working with JSON. Other formats are encouraged to behave
-    // more intelligently if possible.
+    // Sadly this is a lossy representation. For example, None, Some(None), and Some("") are all
+    // stored as an empty file. This is unfourtinate, but usually whan users wont do this
     fn deserialize_option<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        if self.path_exists() {
-            visitor.visit_some(self)
-        } else {
+        if self.read_bytes()?.is_empty() {
             visitor.visit_none()
+        } else {
+            visitor.visit_some(self)
         }
     }
 
@@ -265,7 +263,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer {
     where
         V: Visitor<'de>,
     {
-        self.deserialize_unit(visitor)
+        visitor.visit_unit()
     }
 
     // As is done here, serializers are encouraged to treat newtype structs as
@@ -332,14 +330,26 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer {
     // the fields cannot be known ahead of time is probably a map.
     fn deserialize_struct<V>(
         self,
-        _name: &'static str,
-        _fields: &'static [&'static str],
+        name: &'static str,
+        fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        self.deserialize_map(visitor)
+        dbg!(self.expect_json);
+        if self.points_to_file()? {
+            assert!(self.expect_json);
+            // structs cannot be written as files, so this must be a json sub-object
+            let file = std::fs::File::open(&self.path)?;
+            let mut json_de = serde_json::de::Deserializer::from_reader(file);
+            Ok(json_de.deserialize_struct(name, fields, visitor)?)
+        } else {
+            dbg!();
+            assert!(!self.expect_json);
+            // normal struct
+            self.deserialize_map(visitor)
+        }
     }
 
     fn deserialize_enum<V>(
@@ -358,22 +368,17 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer {
         // }
         // Assume a file within a dir structure looks like: `path1/path2`: "<File data>"
         //
-        // E::Unit will be serialized as: `./E`: "Unit"
-        // E::Advanced will be serialized as `./E/Complex`: "(u8 value as base 10 string)"
-        let enum_name = self.push_first_dir_entry()?;
-        dbg!(&enum_name);
+        // E::Unit will be serialized as: `./`: "Unit"
+        // E::Advanced will be serialized as `./Complex`: "(u8 value as base 10 string)"
 
         if self.points_to_file()? {
-            // handles the basic unit case (E::Unit)
-            println!("basic enum {:?}", &self);
+            // handles the basic unit case (E::Unit), our variant is the content of the current path
             let s = self.read_string().unwrap().into_deserializer();
             let v = visitor.visit_enum(Enum::new(s, self)).unwrap();
-            self.pop();
             Ok(v)
         } else {
             // handles other advanced enums, the name of the variant is the last path
             let s = self.push_first_dir_entry()?.into_deserializer();
-            println!("not file {:?} variant is {:?}", &self, s);
             let v = visitor.visit_enum(Enum::new(s, self)).unwrap();
             self.pop();
             Ok(v)
@@ -468,7 +473,8 @@ struct MapDeserializer<'a> {
 
 impl<'a> MapDeserializer<'a> {
     fn new(de: &'a mut Deserializer) -> Result<Self> {
-        let it = de.path.read_dir()?;
+        dbg!(&de.path);
+        let it = de.path.read_dir().unwrap();
         Ok(Self { de, it })
     }
 }
@@ -489,8 +495,12 @@ impl<'de, 'a> MapAccess<'de> for MapDeserializer<'a> {
             Some(Ok(dir)) => {
                 let os_name = dir.file_name();
                 let path = os_name.to_str().ok_or(Error::InvalidUnicode)?;
+                if path.starts_with("json") {
+                    println!("expect json");
+                    self.de.expect_json = true;
+                }
                 self.de.push(path);
-                let mut de = KeyDeserializer::new(String::from(path));
+                let mut de = KeyDeserializer::new(String::from(path), self.de);
                 let a = Ok(Some(seed.deserialize(&mut de)?));
                 a
             }
@@ -502,6 +512,7 @@ impl<'de, 'a> MapAccess<'de> for MapDeserializer<'a> {
         V: DeserializeSeed<'de>,
     {
         let val = seed.deserialize(&mut *self.de);
+        self.de.expect_json = false;
         self.de.pop();
         val
     }
@@ -581,13 +592,15 @@ impl<'de, 'd> VariantAccess<'de> for Enum<'d> {
     }
 }
 
-struct KeyDeserializer {
+/// Holds a string internally that is uses to respond to deserialize requests
+struct KeyDeserializer<'de> {
     inner: String,
+    de: &'de mut Deserializer,
 }
 
-impl KeyDeserializer {
-    fn new(inner: String) -> Self {
-        Self { inner }
+impl<'de> KeyDeserializer<'de> {
+    fn new(inner: String, de: &'de mut Deserializer) -> Self {
+        Self { inner, de }
     }
 
     fn parse_int<T: FromStr>(&self) -> Result<T>
@@ -611,7 +624,7 @@ impl KeyDeserializer {
     }
 }
 
-impl<'de, 'a> de::Deserializer<'de> for &'a mut KeyDeserializer {
+impl<'de, 'a, 'myde> de::Deserializer<'de> for &'a mut KeyDeserializer<'myde> {
     type Error = Error;
 
     fn deserialize_any<V>(self, _visitor: V) -> Result<V::Value>
@@ -733,13 +746,26 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut KeyDeserializer {
     where
         V: Visitor<'de>,
     {
-        visitor.visit_string(self.inner.clone())
+        visitor.visit_string(std::mem::take(&mut self.inner))
+    }
+
+    fn deserialize_enum<V>(
+        self,
+        _name: &'static str,
+        _variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value>
+    where
+        V: Visitor<'de>,
+    {
+        let variant = std::mem::take(&mut self.inner).into_deserializer();
+        visitor.visit_enum(Enum::new(variant, &mut self.de))
     }
 
     serde::forward_to_deserialize_any! {
 
     bytes byte_buf option unit unit_struct newtype_struct seq tuple
-        tuple_struct map struct enum ignored_any
+        tuple_struct map struct ignored_any
     }
 }
 
@@ -747,6 +773,8 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut KeyDeserializer {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     fn setup_test(base_dir: &str, files: Vec<(&str, &str)>) {
@@ -846,7 +874,6 @@ mod tests {
     #[test]
     fn test_enum() {
         let test_dir = "./.test-de-enum";
-        //Enum tests to be implemented
         #[derive(Deserialize, PartialEq, Debug)]
         enum E {
             Unit,
@@ -855,21 +882,44 @@ mod tests {
             Struct { a: u32 },
         }
 
-        setup_test(test_dir, vec![("E", "Unit")]);
-        let expected = E::Unit;
+        #[derive(Deserialize, PartialEq, Debug)]
+        struct X {
+            e: E,
+        }
+
+        setup_test(test_dir, vec![("e", "Unit")]);
+        let expected = X { e: E::Unit };
         assert_eq!(expected, from_fs(test_dir).unwrap());
 
-        setup_test(test_dir, vec![("E/Newtype", "8")]);
+        setup_test(test_dir, vec![("Newtype", "8")]);
         let expected = E::Newtype(8);
         assert_eq!(expected, from_fs(test_dir).unwrap());
 
-        setup_test(test_dir, vec![("E/Tuple/0", "1"), ("E/Tuple/1", "2")]);
+        setup_test(test_dir, vec![("Tuple/0", "1"), ("Tuple/1", "2")]);
         let expected = E::Tuple(1, 2);
         assert_eq!(expected, from_fs(test_dir).unwrap());
 
-        setup_test(test_dir, vec![("E/Struct/a", "14")]);
+        setup_test(test_dir, vec![("Struct/a", "14")]);
         let expected = E::Struct { a: 14 };
         assert_eq!(expected, from_fs(test_dir).unwrap());
+
+        let _ = std::fs::remove_dir_all(test_dir);
+    }
+
+    #[test]
+    fn test_json() {
+        let test_dir = "./.test-de-json";
+        #[derive(Deserialize, PartialEq, Debug)]
+        struct Data {
+            json: BTreeMap<String, String>,
+        }
+
+        setup_test(test_dir, vec![("json", r#"{"k1":"v1","k2":"v2"}"#)]);
+        let expected = Data {
+            json: [("k1".into(), "v1".into()), ("k2".into(), "v2".into())].into(),
+        };
+        assert_eq!(expected, from_fs(test_dir).unwrap());
+
         let _ = std::fs::remove_dir_all(test_dir);
     }
 }

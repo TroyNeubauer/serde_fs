@@ -9,8 +9,10 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 #[allow(clippy::enum_variant_names)]
 pub enum SerError {
-    #[error("cannot serialize {0}")]
-    UnsupportedType(String),
+    #[error(
+        "cannot serialize root level {0}. These must be placed inside some other structure"
+    )]
+    NotSupportedAtRootLevel(&'static str),
 
     #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
@@ -20,6 +22,9 @@ pub enum SerError {
 
     #[error("utf8: {0}")]
     Utf8Error(FromUtf8Error),
+
+    #[error("json encode: {0}")]
+    SerdeJson(#[from] serde_json::Error),
 }
 
 #[derive(Error, Debug)]
@@ -47,6 +52,9 @@ pub enum DeError {
 
     #[error("{0}")]
     Serde(String),
+
+    #[error("json decode: {0}")]
+    SerdeJson(#[from] serde_json::Error),
 }
 
 impl serde::ser::Error for SerError {

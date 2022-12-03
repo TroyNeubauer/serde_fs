@@ -12,6 +12,8 @@ pub struct Serializer {
     /// The current path this serializer is at
     path: PathBuf,
     path_dirty: bool,
+    /// How many push we have
+    dir_level: usize,
 }
 
 pub fn to_fs<T>(value: &T, path: impl AsRef<Path>) -> Result<()>
@@ -29,6 +31,7 @@ impl Serializer {
         Ok(Self {
             path,
             path_dirty: false,
+            dir_level: 0,
         })
     }
 
@@ -39,9 +42,11 @@ impl Serializer {
     /// This is done to prevet data loss, as there may be data already written to the current path
     /// that we cant overwrite
     fn write_data(&mut self, s: impl AsRef<[u8]>) -> Result<()> {
+        dbg!(self.dir_level);
         if self.path_dirty {
             panic!("BUG: path dirty: {}", self.path.to_string_lossy());
         }
+        assert!(self.dir_level > 0);
         match fs::create_dir_all(&self.path.parent().unwrap()) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -56,12 +61,23 @@ impl Serializer {
     /// parent directories pushed, with the file name being the last item to be pushed
     fn push(&mut self, path: &str) -> Result<()> {
         self.path.push(path);
+        self.dir_level += 1;
         Ok(())
     }
 
     fn pop(&mut self) {
         self.path.pop();
+        self.dir_level -= 1;
         self.path_dirty = false;
+    }
+
+    /// Returns Err(..) if no paths have been pushed yet
+    fn fail_if_at_root(&self, msg: &'static str) -> Result<()> {
+        if self.dir_level == 0 {
+            Err(Error::NotSupportedAtRootLevel(msg))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -86,18 +102,22 @@ impl<'a> ser::Serializer for &'a mut Serializer {
 
     //We do not distinguish between integer types
     fn serialize_i8(self, v: i8) -> Result<()> {
+        self.fail_if_at_root("i8's")?;
         self.serialize_i64(i64::from(v))
     }
 
     fn serialize_i16(self, v: i16) -> Result<()> {
+        self.fail_if_at_root("i16's")?;
         self.serialize_i64(i64::from(v))
     }
 
     fn serialize_i32(self, v: i32) -> Result<()> {
+        self.fail_if_at_root("i32's")?;
         self.serialize_i64(i64::from(v))
     }
 
     fn serialize_i64(self, v: i64) -> Result<()> {
+        self.fail_if_at_root("i64's")?;
         let mut bytes = [0u8; 32];
         let len = itoa::write(&mut bytes[..], v)?;
         self.write_data(&bytes[0..len])?;
@@ -105,18 +125,22 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     }
 
     fn serialize_u8(self, v: u8) -> Result<()> {
+        self.fail_if_at_root("u8's")?;
         self.serialize_u64(u64::from(v))
     }
 
     fn serialize_u16(self, v: u16) -> Result<()> {
+        self.fail_if_at_root("u16's")?;
         self.serialize_u64(u64::from(v))
     }
 
     fn serialize_u32(self, v: u32) -> Result<()> {
+        self.fail_if_at_root("u32's")?;
         self.serialize_u64(u64::from(v))
     }
 
     fn serialize_u64(self, v: u64) -> Result<()> {
+        self.fail_if_at_root("u64's")?;
         let mut bytes = [0u8; 32];
         let len = itoa::write(&mut bytes[..], v)?;
         self.write_data(&bytes[..len])?;
@@ -124,27 +148,34 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     }
 
     fn serialize_f32(self, v: f32) -> Result<()> {
+        self.fail_if_at_root("f32's")?;
         self.write_data(v.to_string())
     }
 
     fn serialize_f64(self, v: f64) -> Result<()> {
+        self.fail_if_at_root("f64's")?;
         self.write_data(v.to_string())
     }
 
     fn serialize_char(self, v: char) -> Result<()> {
-        self.serialize_str(&v.to_string())
+        self.fail_if_at_root("chars")?;
+        let mut bytes = [0u8; 8];
+        v.encode_utf8(&mut bytes);
+        self.write_data(bytes)
     }
 
     fn serialize_str(self, v: &str) -> Result<()> {
+        self.fail_if_at_root("str's")?;
         self.write_data(v)
     }
 
     fn serialize_bytes(self, v: &[u8]) -> Result<()> {
+        self.fail_if_at_root("bytes")?;
         self.write_data(v)
     }
 
-    // An absent optional is represented as the JSON `null`.
     fn serialize_none(self) -> Result<()> {
+        self.fail_if_at_root("options")?;
         self.serialize_unit()
     }
 
@@ -156,45 +187,39 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     }
 
     fn serialize_unit(self) -> Result<()> {
-        //Nop as we are serializing `()`
-        Ok(())
+        dbg!(self.dir_level);
+        self.fail_if_at_root("units")?;
+        // write empty file
+        self.write_data(&[])
     }
 
     // Unit struct means a named value containing no data
     fn serialize_unit_struct(self, _name: &'static str) -> Result<()> {
+        dbg!(self.dir_level);
+        self.fail_if_at_root("unit structs")?;
         self.serialize_unit()
     }
 
-    // When serializing a unit variant (or any other kind of variant), formats
-    // can choose whether to keep track of it by index or by name. Binary
-    // formats typically use the index of the variant and human-readable formats
-    // typically use the name.
     fn serialize_unit_variant(
         self,
-        name: &'static str,
+        _name: &'static str,
         _variant_index: u32,
         variant: &'static str,
     ) -> Result<()> {
-        self.push(name)?;
+        dbg!(self.dir_level);
+        self.fail_if_at_root("enums")?;
         self.serialize_str(variant)?;
-        self.pop();
         Ok(())
     }
 
-    // As is done here, serializers are encouraged to treat newtype structs as
-    // insignificant wrappers around the data they contain.
     fn serialize_newtype_struct<T>(self, _name: &'static str, value: &T) -> Result<()>
     where
         T: ?Sized + Serialize,
     {
+        dbg!(self.dir_level);
         value.serialize(self)
     }
 
-    // Note that newtype variant (and all of the other variant serialization
-    // methods) refer exclusively to the "externally tagged" enum
-    // representation.
-    //
-    // Serialize this to JSON in externally tagged form as `{ NAME: VALUE }`.
     fn serialize_newtype_variant<T>(
         self,
         _name: &'static str,
@@ -205,6 +230,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     where
         T: ?Sized + Serialize,
     {
+        dbg!(self.dir_level);
         self.push(variant)?;
         value.serialize(&mut *self)?;
         self.pop();
@@ -239,6 +265,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         _name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleStruct> {
+        dbg!(self.dir_level);
         Ok(SequentialSerializer::new(self))
     }
 
@@ -251,26 +278,19 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleVariant> {
+        dbg!(self.dir_level);
         self.push(variant)?;
         Ok(SequentialSerializer::new(self))
     }
 
-    // Maps are represented in JSON as `{ K: V, K: V, ... }`.
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap> {
         Ok(self)
     }
 
-    // Structs look just like maps in JSON. In particular, JSON requires that we
-    // serialize the field names of the struct. Other formats may be able to
-    // omit the field names when serializing structs because the corresponding
-    // Deserialize implementation is required to know what the keys are without
-    // looking at the serialized data.
-    fn serialize_struct(self, _name: &'static str, len: usize) -> Result<Self::SerializeStruct> {
-        self.serialize_map(Some(len))
+    fn serialize_struct(self, _name: &'static str, _len: usize) -> Result<Self::SerializeStruct> {
+        Ok(self)
     }
 
-    // Struct variants are represented in JSON as `{ NAME: { K: V, ... } }`.
-    // This is the externally tagged representation.
     fn serialize_struct_variant(
         self,
         _name: &'static str,
@@ -278,6 +298,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStructVariant> {
+        dbg!(self.dir_level);
         self.push(variant)?;
         Ok(self)
     }
@@ -361,15 +382,6 @@ impl<'a> SerializeTupleStruct for SequentialSerializer<'a> {
     }
 }
 
-// Tuple variants are a little different. Refer back to the
-// `serialize_tuple_variant` method above:
-//
-//    self.output += "{";
-//    variant.serialize(&mut *self)?;
-//    self.output += ":[";
-//
-// So the `end` method in this impl is responsible for closing both the `]` and
-// the `}`.
 impl<'a> ser::SerializeTupleVariant for SequentialSerializer<'a> {
     type Ok = ();
     type Error = SerError;
@@ -386,26 +398,10 @@ impl<'a> ser::SerializeTupleVariant for SequentialSerializer<'a> {
     }
 }
 
-// Some `Serialize` types are not able to hold a key and value in memory at the
-// same time so `SerializeMap` implementations are required to support
-// `serialize_key` and `serialize_value` individually.
-//
-// There is a third optional method on the `SerializeMap` trait. The
-// `serialize_entry` method allows serializers to optimize for the case where
-// key and value are both available simultaneously. In JSON it doesn't make a
-// difference so the default behavior for `serialize_entry` is fine.
 impl<'a> ser::SerializeMap for &'a mut Serializer {
     type Ok = ();
     type Error = SerError;
 
-    // The Serde data model allows map keys to be any serializable type. JSON
-    // only allows string keys so the implementation below will produce invalid
-    // JSON if the key serializes as something other than a string.
-    //
-    // A real JSON serializer would need to validate that map keys are strings.
-    // This can be done by using a different Serializer to serialize the key
-    // (instead of `&mut **self`) and having that other serializer only
-    // implement `serialize_str` and return an error on any other data type.
     fn serialize_key<T>(&mut self, key: &T) -> Result<()>
     where
         T: ?Sized + Serialize,
@@ -443,7 +439,12 @@ impl<'a> ser::SerializeStruct for &'a mut Serializer {
         T: ?Sized + Serialize,
     {
         self.push(key)?;
-        value.serialize(&mut **self)?;
+        if key.starts_with("json") {
+            let s = serde_json::to_string(value)?;
+            s.serialize(&mut **self)?;
+        } else {
+            value.serialize(&mut **self)?;
+        }
         self.pop();
 
         Ok(())
@@ -465,7 +466,12 @@ impl<'a> ser::SerializeStructVariant for &'a mut Serializer {
         T: ?Sized + Serialize,
     {
         self.push(key)?;
-        value.serialize(&mut **self)?;
+        if key.starts_with("json") {
+            let s = serde_json::to_string(value)?;
+            s.serialize(&mut **self)?;
+        } else {
+            value.serialize(&mut **self)?;
+        }
         self.pop();
 
         Ok(())
@@ -598,9 +604,9 @@ impl<'a> ser::Serializer for &'a mut StringSerializer {
         self,
         _name: &'static str,
         _variant_index: u32,
-        _variant: &'static str,
+        variant: &'static str,
     ) -> Result<()> {
-        unsupported()
+        self.set_str(String::from(variant))
     }
 
     fn serialize_newtype_struct<T: ?Sized>(self, _name: &'static str, _value: &T) -> Result<()>
@@ -672,11 +678,13 @@ impl<'a> ser::Serializer for &'a mut StringSerializer {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
-    fn check_and_reset(base_dir: &str, files: Vec<(&str, &str)>) {
+    fn check_and_reset(test_dir: &str, files: Vec<(&str, &str)>) {
         for (path, expected) in files {
-            let path = format!("{}/{}", base_dir, path);
+            let path = format!("{}/{}", test_dir, path);
             let bytes = match std::fs::read(&path) {
                 Ok(b) => b,
                 Err(err) => panic!("Failed to open file {}: {}", path, err),
@@ -689,7 +697,7 @@ mod tests {
         }
 
         //Reset for next time
-        std::fs::remove_dir_all(base_dir).unwrap();
+        std::fs::remove_dir_all(test_dir).unwrap();
     }
 
     #[test]
@@ -702,6 +710,7 @@ mod tests {
         }
 
         let test_dir = "./.test-ser-struct";
+        let _ = std::fs::remove_dir_all(test_dir);
 
         let test = Test {
             int: 100,
@@ -719,6 +728,7 @@ mod tests {
     #[allow(dead_code)]
     fn test_unit_enum() {
         let test_dir = "./.test-ser-unit-enum";
+        let _ = std::fs::remove_dir_all(test_dir);
 
         #[derive(Serialize)]
         enum E {
@@ -728,20 +738,75 @@ mod tests {
             Struct { a: u32 },
         }
 
-        let u = E::Unit;
-        to_fs(&u, test_dir).unwrap();
-        check_and_reset(test_dir, vec![("E", "Unit")]);
+        #[derive(Serialize)]
+        struct X {
+            e: E,
+        }
 
+        dbg!();
+        let u = X { e: E::Unit };
+        to_fs(&u, test_dir).unwrap();
+        check_and_reset(test_dir, vec![("e", "Unit")]);
+
+        dbg!();
         let n = E::Newtype(1);
         to_fs(&n, test_dir).unwrap();
         check_and_reset(test_dir, vec![("Newtype", "1")]);
 
+        dbg!();
         let t = E::Tuple(1, 10);
         to_fs(&t, test_dir).unwrap();
         check_and_reset(test_dir, vec![("Tuple/0", "1"), ("Tuple/1", "10")]);
 
+        dbg!();
         let s = E::Struct { a: 510 };
         to_fs(&s, test_dir).unwrap();
         check_and_reset(test_dir, vec![("Struct/a", "510")]);
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_json() {
+        let test_dir = "./.test-ser-json";
+        let _ = std::fs::remove_dir_all(test_dir);
+
+        #[derive(Serialize)]
+        enum Enum {
+            Inner {
+                json: BTreeMap<&'static str, &'static str>,
+            },
+        }
+
+        let u = Enum::Inner {
+            json: [("k1", "v1"), ("k2", "v2")].into(),
+        };
+        to_fs(&u, test_dir).unwrap();
+        check_and_reset(test_dir, vec![("Inner/json", r#"{"k1":"v1","k2":"v2"}"#)]);
+
+        #[derive(Serialize)]
+        struct Basic {
+            json: u8,
+            json_comp: String,
+        }
+
+        let u = Basic {
+            json: 0,
+            json_comp: "abc".into(),
+        };
+        to_fs(&u, test_dir).unwrap();
+        check_and_reset(test_dir, vec![("json", "0"), ("json_comp", "\"abc\"".into())]);
+
+        #[derive(Serialize)]
+        struct Struct {
+            // make sure renaming works
+            #[serde(rename = "json")]
+            my_map: BTreeMap<&'static str, &'static str>,
+        }
+
+        let u = Struct {
+            my_map: [("k1", "v1"), ("k2", "v2")].into(),
+        };
+        to_fs(&u, test_dir).unwrap();
+        check_and_reset(test_dir, vec![("json", r#"{"k1":"v1","k2":"v2"}"#)]);
     }
 }
