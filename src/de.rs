@@ -494,10 +494,8 @@ impl<'de, 'a> MapAccess<'de> for MapDeserializer<'a> {
                 let os_name = dir.file_name();
                 let path = os_name.to_str().ok_or(Error::InvalidUnicode)?;
                 if path.starts_with("json") {
-                    println!("expect json");
                     self.de.expect_json = true;
                 }
-                println!("map key: {:?}", &path);
                 self.de.push(path);
                 let mut de = KeyDeserializer::new(String::from(path), self.de);
                 let a = Ok(Some(seed.deserialize(&mut de)?));
@@ -510,7 +508,6 @@ impl<'de, 'a> MapAccess<'de> for MapDeserializer<'a> {
     where
         V: DeserializeSeed<'de>,
     {
-        println!("in map value at: {:?}", &self.de.path);
         let val = seed.deserialize(&mut *self.de);
         self.de.expect_json = false;
         self.de.pop();
