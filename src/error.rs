@@ -9,9 +9,7 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 #[allow(clippy::enum_variant_names)]
 pub enum SerError {
-    #[error(
-        "cannot serialize root level {0}. These must be placed inside some other structure"
-    )]
+    #[error("cannot serialize root level {0}. These must be placed inside some other structure")]
     NotSupportedAtRootLevel(&'static str),
 
     #[error("io error: {0}")]

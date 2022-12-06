@@ -4,7 +4,6 @@
 /// # Example
 /// ```
 /// ```
-
 mod de;
 mod error;
 mod ser;
