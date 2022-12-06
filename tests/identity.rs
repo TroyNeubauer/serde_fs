@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use std::{collections::BTreeMap, marker::PhantomData, ops::Range};
+use std::{collections::BTreeMap, ops::Range};
 
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
@@ -60,8 +60,6 @@ struct S {
     #[serde(with = "serde_bytes")]
     bytes: Vec<u8>,
     opt: Option<String>,
-    unit: (),
-    phantom: PhantomData<()>,
     unit_variant: BasicEnum,
     newtype: Millimeters,
     advanced_enum: AdvEnum,
@@ -74,8 +72,8 @@ struct Millimeters(u8);
 
 #[test]
 fn identity() {
-    for _ in 0..100_000 {
-        let test_dir = "./.test-identity";
+    for _ in 0..1_000 {
+        let test_dir = "/tmp/.test-identity";
         let _ = std::fs::remove_dir_all(test_dir);
 
         let mut rng = rand::thread_rng();
@@ -197,8 +195,6 @@ impl S {
                 true => Some(s3),
                 false => None,
             },
-            unit: (),
-            phantom: PhantomData,
             newtype: Millimeters(rng.gen()),
             inner: Inner::random(rng),
         }

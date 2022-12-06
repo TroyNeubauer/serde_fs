@@ -42,7 +42,6 @@ impl Serializer {
     /// This is done to prevet data loss, as there may be data already written to the current path
     /// that we cant overwrite
     fn write_data(&mut self, s: impl AsRef<[u8]>) -> Result<()> {
-        dbg!(self.dir_level);
         if self.path_dirty {
             panic!("BUG: path dirty: {}", self.path.to_string_lossy());
         }
@@ -175,8 +174,8 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     }
 
     fn serialize_none(self) -> Result<()> {
-        self.fail_if_at_root("options")?;
-        self.serialize_unit()
+        // Nop. Dont write to any file
+        Ok(())
     }
 
     fn serialize_some<T>(self, value: &T) -> Result<()>
@@ -187,15 +186,12 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     }
 
     fn serialize_unit(self) -> Result<()> {
-        dbg!(self.dir_level);
-        self.fail_if_at_root("units")?;
-        // write empty file
-        self.write_data(&[])
+        // Nop
+        Ok(())
     }
 
     // Unit struct means a named value containing no data
     fn serialize_unit_struct(self, _name: &'static str) -> Result<()> {
-        dbg!(self.dir_level);
         self.fail_if_at_root("unit structs")?;
         self.serialize_unit()
     }
@@ -206,7 +202,6 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         _variant_index: u32,
         variant: &'static str,
     ) -> Result<()> {
-        dbg!(self.dir_level);
         self.fail_if_at_root("enums")?;
         self.serialize_str(variant)?;
         Ok(())
@@ -216,7 +211,6 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     where
         T: ?Sized + Serialize,
     {
-        dbg!(self.dir_level);
         value.serialize(self)
     }
 
@@ -230,7 +224,6 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     where
         T: ?Sized + Serialize,
     {
-        dbg!(self.dir_level);
         self.push(variant)?;
         value.serialize(&mut *self)?;
         self.pop();
@@ -265,7 +258,6 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         _name: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleStruct> {
-        dbg!(self.dir_level);
         Ok(SequentialSerializer::new(self))
     }
 
@@ -278,7 +270,6 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleVariant> {
-        dbg!(self.dir_level);
         self.push(variant)?;
         Ok(SequentialSerializer::new(self))
     }
@@ -298,7 +289,6 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStructVariant> {
-        dbg!(self.dir_level);
         self.push(variant)?;
         Ok(self)
     }
@@ -743,22 +733,18 @@ mod tests {
             e: E,
         }
 
-        dbg!();
         let u = X { e: E::Unit };
         to_fs(&u, test_dir).unwrap();
         check_and_reset(test_dir, vec![("e", "Unit")]);
 
-        dbg!();
         let n = E::Newtype(1);
         to_fs(&n, test_dir).unwrap();
         check_and_reset(test_dir, vec![("Newtype", "1")]);
 
-        dbg!();
         let t = E::Tuple(1, 10);
         to_fs(&t, test_dir).unwrap();
         check_and_reset(test_dir, vec![("Tuple/0", "1"), ("Tuple/1", "10")]);
 
-        dbg!();
         let s = E::Struct { a: 510 };
         to_fs(&s, test_dir).unwrap();
         check_and_reset(test_dir, vec![("Struct/a", "510")]);
@@ -794,7 +780,10 @@ mod tests {
             json_comp: "abc".into(),
         };
         to_fs(&u, test_dir).unwrap();
-        check_and_reset(test_dir, vec![("json", "0"), ("json_comp", "\"abc\"".into())]);
+        check_and_reset(
+            test_dir,
+            vec![("json", "0"), ("json_comp", "\"abc\"".into())],
+        );
 
         #[derive(Serialize)]
         struct Struct {
